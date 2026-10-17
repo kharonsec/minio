@@ -1538,7 +1538,7 @@ func getS3TTFBDistributionMD() MetricDescription {
 		Subsystem: ttfbSubsystem,
 		Name:      ttfbDistribution,
 		Help:      "Distribution of time to first byte across API calls",
-		Type:      gaugeMetric,
+		Type:      histogramMetric,
 	}
 }
 
@@ -1548,7 +1548,7 @@ func getBucketTTFBDistributionMD() MetricDescription {
 		Subsystem: ttfbSubsystem,
 		Name:      ttfbDistribution,
 		Help:      "Distribution of time to first byte across API calls per bucket",
-		Type:      gaugeMetric,
+		Type:      histogramMetric,
 	}
 }
 
@@ -1920,12 +1920,115 @@ func getHistogramMetrics(hist *prometheus.HistogramVec, desc MetricDescription, 
 	return metrics
 }
 
+// promHistogramBucketLabel is the HistogramBucketLabel of a histogramMetric
+// that is exported as a Prometheus histogram (with _bucket, _sum and _count
+// series) rather than as one gauge per Histogram entry. For such a metric,
+// Histogram maps each bucket upper bound to its cumulative count, its
+// "+Inf" entry holds the sample count and Value holds the sample sum.
+const promHistogramBucketLabel = "le"
+
+// getPromHistogramMetrics returns one MetricV2 per label set of hist, to be
+// exported as a Prometheus histogram. See promHistogramBucketLabel.
+//
+// The toLowerAPILabels parameter is added for compatibility,
+// if set, it lowercases the `api` label values.
+func getPromHistogramMetrics(hist *prometheus.HistogramVec, desc MetricDescription, toLowerAPILabels, limitBuckets bool) []MetricV2 {
+	ch := make(chan prometheus.Metric)
+	go func() {
+		defer xioutil.SafeClose(ch)
+		// Collects prometheus metrics from hist and sends it over ch
+		hist.Collect(ch)
+	}()
+
+	var metrics []MetricV2
+	buckets := make(map[string][]MetricV2, v2MetricsMaxBuckets)
+	for promMetric := range ch {
+		dtoMetric := &dto.Metric{}
+		if err := promMetric.Write(dtoMetric); err != nil {
+			// Log error and continue to receive other metric
+			// values
+			bugLogIf(GlobalContext, err)
+			continue
+		}
+
+		labels := make(map[string]string, len(dtoMetric.GetLabel()))
+		for _, lp := range dtoMetric.GetLabel() {
+			if lp.GetName() == "api" && toLowerAPILabels {
+				labels[lp.GetName()] = strings.ToLower(lp.GetValue())
+			} else {
+				labels[lp.GetName()] = lp.GetValue()
+			}
+		}
+
+		h := dtoMetric.GetHistogram()
+		histogram := make(map[string]uint64, len(h.GetBucket())+1)
+		for _, b := range h.GetBucket() {
+			histogram[strconv.FormatFloat(b.GetUpperBound(), 'g', -1, 64)] = b.GetCumulativeCount()
+		}
+		histogram["+Inf"] = h.GetSampleCount()
+
+		metric := MetricV2{
+			Description:          desc,
+			VariableLabels:       labels,
+			Value:                h.GetSampleSum(),
+			HistogramBucketLabel: promHistogramBucketLabel,
+			Histogram:            histogram,
+		}
+		if limitBuckets && labels["bucket"] != "" {
+			buckets[labels["bucket"]] = append(buckets[labels["bucket"]], metric)
+		} else {
+			metrics = append(metrics, metric)
+		}
+	}
+
+	// Limit bucket metrics...
+	if limitBuckets {
+		bucketNames := mapKeysSorted(buckets)
+		bucketNames = bucketNames[:min(len(buckets), v2MetricsMaxBuckets)]
+		for _, b := range bucketNames {
+			metrics = append(metrics, buckets[b]...)
+		}
+	}
+	return metrics
+}
+
+// newPromHistogramMetric converts a MetricV2 built by getPromHistogramMetrics
+// into a Prometheus histogram.
+func newPromHistogramMetric(metric MetricV2, labels []string, values []string) (prometheus.Metric, error) {
+	var count uint64
+	buckets := make(map[float64]uint64, len(metric.Histogram))
+	for k, v := range metric.Histogram {
+		if k == "+Inf" {
+			count = v
+			continue
+		}
+		upperBound, err := strconv.ParseFloat(k, 64)
+		if err != nil {
+			return nil, err
+		}
+		buckets[upperBound] = v
+	}
+	return prometheus.NewConstHistogram(
+		prometheus.NewDesc(
+			prometheus.BuildFQName(string(metric.Description.Namespace),
+				string(metric.Description.Subsystem),
+				string(metric.Description.Name)),
+			metric.Description.Help,
+			labels,
+			metric.StaticLabels,
+		),
+		count,
+		metric.Value,
+		buckets,
+		values...)
+}
+
 func getBucketTTFBMetric() *MetricsGroupV2 {
 	mg := &MetricsGroupV2{
 		cacheInterval: 10 * time.Second,
 	}
 	mg.RegisterRead(func(ctx context.Context) []MetricV2 {
-		return getHistogramMetrics(bucketHTTPRequestsDuration,
+		return getPromHistogramMetrics(bucketHTTPRequestsDuration,
 			getBucketTTFBDistributionMD(), true, true)
 	})
 	return mg
@@ -1936,7 +2039,7 @@ func getS3TTFBMetric() *MetricsGroupV2 {
 		cacheInterval: 10 * time.Second,
 	}
 	mg.RegisterRead(func(ctx context.Context) []MetricV2 {
-		return getHistogramMetrics(httpRequestsDuration,
+		return getPromHistogramMetrics(httpRequestsDuration,
 			getS3TTFBDistributionMD(), true, true)
 	})
 	return mg
@@ -4028,6 +4131,18 @@ func getKMSMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 }
 
 func collectMetric(metric MetricV2, labels []string, values []string, metricName string, out chan<- prometheus.Metric) {
+	if metric.Description.Type == histogramMetric && metric.HistogramBucketLabel == promHistogramBucketLabel {
+		pmetric, err := newPromHistogramMetric(metric, labels, values)
+		if err != nil {
+			// Enable for debugging
+			if serverDebugLog {
+				bugLogIf(GlobalContext, fmt.Errorf("unable to validate prometheus metric (%w) %v+%v", err, values, metric.Histogram))
+			}
+		} else {
+			out <- pmetric
+		}
+		return
+	}
 	if metric.Description.Type == histogramMetric {
 		if metric.Histogram == nil {
 			return
@@ -4214,6 +4329,15 @@ func (c *minioNodeCollector) Collect(ch chan<- prometheus.Metric) {
 		values = append(values, globalLocalNodeName)
 		labels = append(labels, serverName)
 
+		if metric.Description.Type == histogramMetric && metric.HistogramBucketLabel == promHistogramBucketLabel {
+			pmetric, err := newPromHistogramMetric(metric, labels, values)
+			if err != nil {
+				bugLogIf(GlobalContext, err)
+			} else {
+				ch <- pmetric
+			}
+			return true
+		}
 		if metric.Description.Type == histogramMetric {
 			if metric.Histogram == nil {
 				return true
