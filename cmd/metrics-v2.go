@@ -4364,19 +4364,25 @@ func metricsServerHandler() http.Handler {
 	})
 }
 
+// registerOptionalCollector registers c with registry, logging and skipping
+// it on error instead of failing. Some collectors cannot be registered on
+// every platform, e.g. the process collector needs procfs and fails to
+// register on OpenBSD.
+func registerOptionalCollector(registry *prometheus.Registry, c prometheus.Collector) {
+	if err := registry.Register(c); err != nil {
+		metricsLogIf(GlobalContext, fmt.Errorf("unable to register metrics collector, skipping it: %w", err))
+	}
+}
+
 func metricsNodeHandler() http.Handler {
 	registry := prometheus.NewRegistry()
 
 	logger.CriticalIf(GlobalContext, registry.Register(nodeCollector))
-	if err := registry.Register(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{
+	registerOptionalCollector(registry, prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{
 		Namespace:    minioNamespace,
 		ReportErrors: true,
-	})); err != nil {
-		logger.CriticalIf(GlobalContext, err)
-	}
-	if err := registry.Register(prometheus.NewGoCollector()); err != nil {
-		logger.CriticalIf(GlobalContext, err)
-	}
+	}))
+	registerOptionalCollector(registry, prometheus.NewGoCollector())
 	gatherers := prometheus.Gatherers{
 		registry,
 	}

@@ -18,6 +18,7 @@
 package cmd
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -211,5 +212,35 @@ func TestGetHistogramMetrics_Values(t *testing.T) {
 	}
 	if value := lowerCopyObjects[2].Value; value != 3 {
 		t.Errorf("Expected le='+Inf' api=copyobject value to be 3 but got '%v'", value)
+	}
+}
+
+// unsupportedCollector mimics prometheus' process collector on a platform
+// without procfs: its descriptor is invalid, so Register fails.
+type unsupportedCollector struct{}
+
+func (unsupportedCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- prometheus.NewInvalidDesc(errors.New("process metrics not supported on this platform"))
+}
+
+func (unsupportedCollector) Collect(chan<- prometheus.Metric) {}
+
+// Regression test for https://github.com/minio/minio/issues/21188
+func TestRegisterOptionalCollector(t *testing.T) {
+	registry := prometheus.NewRegistry()
+
+	// Must not panic.
+	registerOptionalCollector(registry, unsupportedCollector{})
+
+	counter := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_counter", Help: "test"})
+	registerOptionalCollector(registry, counter)
+	counter.Inc()
+
+	mfs, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mfs) != 1 || mfs[0].GetName() != "test_counter" {
+		t.Fatalf("unexpected metric families: %v", mfs)
 	}
 }
