@@ -61,9 +61,14 @@ func newUnsignedV4ChunkedReader(req *http.Request, trailer bool) (io.ReadCloser,
 	return &s3UnsignedChunkedReader{
 		trailers: req.Trailer,
 		reader:   bufio.NewReader(req.Body),
-		buffer:   make([]byte, 64*1024),
 	}, ErrNone
 }
+
+// maxUnsignedChunkSize is the largest chunk accepted by
+// s3UnsignedChunkedReader. Chunk data is streamed rather than
+// buffered, so the limit only guards the size parsing against
+// overflow: no chunk can be larger than an object.
+const maxUnsignedChunkSize = globalMaxObjectSize
 
 // Represents the overall state that is required for decoding a
 // AWS Signature V4 chunked reader.
@@ -71,66 +76,53 @@ type s3UnsignedChunkedReader struct {
 	reader   *bufio.Reader
 	trailers http.Header
 
-	buffer []byte
-	offset int
-	err    error
-	debug  bool
+	// remaining is the number of data bytes of the current
+	// chunk not yet returned to the caller.
+	remaining int64
+	err       error
+	debug     bool
 }
 
 func (cr *s3UnsignedChunkedReader) Close() (err error) {
 	return cr.err
 }
 
-// Read - implements `io.Reader`, which transparently decodes
-// the incoming AWS Signature V4 streaming signature.
-func (cr *s3UnsignedChunkedReader) Read(buf []byte) (n int, err error) {
-	// First, if there is any unread data, copy it to the client
-	// provided buffer.
-	if cr.offset > 0 {
-		n = copy(buf, cr.buffer[cr.offset:])
-		if n == len(buf) {
-			cr.offset += n
-			return n, nil
+// mustRead reads from input and compares against provided slice.
+func (cr *s3UnsignedChunkedReader) mustRead(b ...byte) error {
+	for _, want := range b {
+		got, err := cr.reader.ReadByte()
+		if err == io.EOF {
+			return io.ErrUnexpectedEOF
 		}
-		cr.offset = 0
-		buf = buf[n:]
-	}
-	// mustRead reads from input and compares against provided slice.
-	mustRead := func(b ...byte) error {
-		for _, want := range b {
-			got, err := cr.reader.ReadByte()
-			if err == io.EOF {
-				return io.ErrUnexpectedEOF
-			}
-			if got != want {
-				if cr.debug {
-					fmt.Printf("mustread: want: %q got: %q\n", string(want), string(got))
-				}
-				return errMalformedEncoding
-			}
-			if err != nil {
-				return err
-			}
+		if err != nil {
+			return err
 		}
-		return nil
+		if got != want {
+			if cr.debug {
+				fmt.Printf("mustread: want: %q got: %q\n", string(want), string(got))
+			}
+			return errMalformedEncoding
+		}
 	}
-	var size int
+	return nil
+}
+
+// readChunkSize reads a chunk size line, terminated by \r\n.
+func (cr *s3UnsignedChunkedReader) readChunkSize() (int64, error) {
+	var size int64
 	for {
 		b, err := cr.reader.ReadByte()
 		if err == io.EOF {
 			err = io.ErrUnexpectedEOF
 		}
 		if err != nil {
-			cr.err = err
-			return n, cr.err
+			return 0, err
 		}
 		if b == '\r' { // \r\n denotes end of size.
-			err := mustRead('\n')
-			if err != nil {
-				cr.err = err
-				return n, cr.err
+			if err := cr.mustRead('\n'); err != nil {
+				return 0, err
 			}
-			break
+			return size, nil
 		}
 
 		// Manually deserialize the size since AWS specified
@@ -139,69 +131,89 @@ func (cr *s3UnsignedChunkedReader) Read(buf []byte) (n int, err error) {
 		// is `10000`.
 		switch {
 		case b >= '0' && b <= '9':
-			size = size<<4 | int(b-'0')
+			size = size<<4 | int64(b-'0')
 		case b >= 'a' && b <= 'f':
-			size = size<<4 | int(b-('a'-10))
+			size = size<<4 | int64(b-('a'-10))
 		case b >= 'A' && b <= 'F':
-			size = size<<4 | int(b-('A'-10))
+			size = size<<4 | int64(b-('A'-10))
 		default:
 			if cr.debug {
 				fmt.Printf("err size: %v\n", string(b))
 			}
-			cr.err = errMalformedEncoding
-			return n, cr.err
+			return 0, errMalformedEncoding
 		}
-		if size > maxChunkSize {
-			cr.err = errChunkTooBig
-			return n, cr.err
+		if size > maxUnsignedChunkSize {
+			return 0, errChunkTooBig
 		}
 	}
+}
 
-	if cap(cr.buffer) < size {
-		cr.buffer = make([]byte, size)
-	} else {
-		cr.buffer = cr.buffer[:size]
+// Read - implements `io.Reader`, which transparently decodes
+// the incoming AWS Signature V4 streaming signature.
+//
+// Chunk data is copied straight from the request body to buf, so the
+// memory used does not depend on the chunk size.
+func (cr *s3UnsignedChunkedReader) Read(buf []byte) (n int, err error) {
+	if cr.err != nil {
+		return 0, cr.err
 	}
-
-	// Now, we read the payload.
-	_, err = io.ReadFull(cr.reader, cr.buffer)
-	if err == io.EOF && size != 0 {
-		err = io.ErrUnexpectedEOF
-	}
-	if err != nil && err != io.EOF {
-		cr.err = err
-		return n, cr.err
-	}
-
-	// If the chunk size is zero we return io.EOF. As specified by AWS,
-	// only the last chunk is zero-sized.
-	if len(cr.buffer) == 0 {
-		if cr.debug {
-			fmt.Println("EOF")
-		}
-		if cr.trailers != nil {
-			err = cr.readTrailers()
-			if cr.debug {
-				fmt.Println("trailer returned:", err)
+	for n < len(buf) {
+		if cr.remaining == 0 {
+			if n > 0 {
+				// Return what we have before blocking on the next chunk.
+				return n, nil
 			}
+			size, err := cr.readChunkSize()
 			if err != nil {
 				cr.err = err
-				return 0, err
+				return n, err
+			}
+			// If the chunk size is zero we return io.EOF. As specified by AWS,
+			// only the last chunk is zero-sized.
+			if size == 0 {
+				if cr.debug {
+					fmt.Println("EOF")
+				}
+				if cr.trailers != nil {
+					err = cr.readTrailers()
+					if cr.debug {
+						fmt.Println("trailer returned:", err)
+					}
+					if err != nil {
+						cr.err = err
+						return 0, err
+					}
+				}
+				cr.err = io.EOF
+				return n, cr.err
+			}
+			cr.remaining = size
+		}
+
+		// Now, we read the payload.
+		p := buf[n:]
+		if int64(len(p)) > cr.remaining {
+			p = p[:cr.remaining]
+		}
+		m, err := cr.reader.Read(p)
+		n += m
+		cr.remaining -= int64(m)
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			cr.err = err
+			return n, err
+		}
+		if cr.remaining == 0 {
+			// read final terminator.
+			if err := cr.mustRead('\r', '\n'); err != nil {
+				cr.err = err
+				return n, err
 			}
 		}
-		cr.err = io.EOF
-		return n, cr.err
 	}
-	// read final terminator.
-	err = mustRead('\r', '\n')
-	if err != nil && err != io.EOF {
-		cr.err = err
-		return n, cr.err
-	}
-
-	cr.offset = copy(buf, cr.buffer)
-	n += cr.offset
-	return n, err
+	return n, nil
 }
 
 // readTrailers will read all trailers and populate cr.trailers with actual values.
