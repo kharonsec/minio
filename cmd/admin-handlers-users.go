@@ -358,14 +358,18 @@ func (a adminAPIHandlers) ListGroups(w http.ResponseWriter, r *http.Request) {
 func (a adminAPIHandlers) SetGroupStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	objectAPI, _ := validateAdminReq(ctx, w, r, policy.EnableGroupAdminAction)
-	if objectAPI == nil {
-		return
-	}
-
 	vars := mux.Vars(r)
 	group := vars["group"]
 	status := vars["status"]
+
+	var action policy.AdminAction = policy.EnableGroupAdminAction
+	if status == statusDisabled {
+		action = policy.DisableGroupAdminAction
+	}
+	objectAPI, _ := validateAdminReq(ctx, w, r, action)
+	if objectAPI == nil {
+		return
+	}
 
 	var (
 		err       error
@@ -401,14 +405,18 @@ func (a adminAPIHandlers) SetGroupStatus(w http.ResponseWriter, r *http.Request)
 func (a adminAPIHandlers) SetUserStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	objectAPI, creds := validateAdminReq(ctx, w, r, policy.EnableUserAdminAction)
-	if objectAPI == nil {
-		return
-	}
-
 	vars := mux.Vars(r)
 	accessKey := vars["accessKey"]
 	status := vars["status"]
+
+	var action policy.AdminAction = policy.EnableUserAdminAction
+	if madmin.AccountStatus(status) == madmin.AccountDisabled {
+		action = policy.DisableUserAdminAction
+	}
+	objectAPI, creds := validateAdminReq(ctx, w, r, action)
+	if objectAPI == nil {
+		return
+	}
 
 	// you cannot enable or disable yourself.
 	if accessKey == creds.AccessKey {
