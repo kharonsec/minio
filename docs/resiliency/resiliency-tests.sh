@@ -40,8 +40,25 @@ function verify_resiliency_failure() {
 	fi
 }
 
+# Drives that are briefly offline, for example on a loaded CI runner, are
+# reported as missing by healing; wait until all drives are online.
+function wait_for_all_drives_online() {
+	local INFO
+	for _ in $(seq 1 60); do
+		INFO=$(./mc admin info --json myminio 2>/dev/null)
+		if [ "$(echo "$INFO" | jq -r '.info.backend.offlineDisks // 0')" = "0" ] &&
+			[ "$(echo "$INFO" | jq -r '[.info.servers[].state] | length > 0 and all(. == "online")')" = "true" ]; then
+			return 0
+		fi
+		sleep 1
+	done
+	echo "Not all drives came online"
+	return 1
+}
+
 function verify_resiliency_healing() {
 	local WANT=$2
+	wait_for_all_drives_online
 	docs/resiliency/resiliency-verify-healing-script.sh "$WANT"
 	RESULT=$(grep "script passed" <resiliency-verify-healing.log)
 	if [ "$RESULT" != "script passed" ]; then
