@@ -692,8 +692,10 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 
 	lookupResult, groupDistNames, err := globalIAMSys.LDAPConfig.Bind(ldapUsername, ldapPassword)
 	if err != nil {
-		err = fmt.Errorf("LDAP server error: %w", err)
-		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue, err)
+		// Do not reveal whether the user exists or their DN to the
+		// client, which allows enumerating users.
+		authNLogIf(ctx, fmt.Errorf("LDAP server error: %w", err))
+		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue, errors.New("LDAP authentication failed"))
 		return
 	}
 	ldapUserDN := lookupResult.NormDN
