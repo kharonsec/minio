@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	slashpath "path"
 	"runtime"
 	"strings"
@@ -1939,5 +1940,57 @@ func TestXLStorageReadMetadata(t *testing.T) {
 	disk.MakeVol(t.Context(), volume)
 	if _, err := disk.readMetadata(t.Context(), pathJoin(tmpDir, volume, object)); err != errFileNameTooLong {
 		t.Fatalf("Unexpected error from readMetadata - expect %v: got %v", errFileNameTooLong, err)
+	}
+}
+
+// TestXLStorageReadMultipleTraversal verifies ReadMultiple cannot read
+// files outside the drive through ".." in the request fields.
+func TestXLStorageReadMultipleTraversal(t *testing.T) {
+	xlStorage, diskPath, err := newXLStorageTestSetup(t)
+	if err != nil {
+		t.Fatalf("Unable to create xlStorage test setup, %s", err)
+	}
+	if err = xlStorage.MakeVol(t.Context(), "bucket"); err != nil {
+		t.Fatal(err)
+	}
+	if err = xlStorage.AppendFile(t.Context(), "bucket", "object/file", []byte("inside")); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(filepath.Dir(diskPath), "secret-"+filepath.Base(diskPath))
+	if err = os.WriteFile(secret, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(secret)
+
+	readAll := func(req ReadMultipleReq) ([]ReadMultipleResp, error) {
+		respCh := make(chan ReadMultipleResp, len(req.Files))
+		err := xlStorage.ReadMultiple(t.Context(), req, respCh)
+		var resps []ReadMultipleResp
+		for r := range respCh {
+			resps = append(resps, r)
+		}
+		return resps, err
+	}
+
+	resps, err := readAll(ReadMultipleReq{Bucket: "bucket", Prefix: "object", Files: []string{"file"}})
+	if err != nil || len(resps) != 1 || string(resps[0].Data) != "inside" {
+		t.Fatalf("expected to read file inside the drive, got %v, %v", resps, err)
+	}
+
+	for _, req := range []ReadMultipleReq{
+		{Bucket: "..", Files: []string{filepath.Base(secret)}},
+		{Bucket: "../", Files: []string{filepath.Base(secret)}},
+		{Bucket: "bucket", Prefix: "../..", Files: []string{filepath.Base(secret)}},
+		{Bucket: "bucket", Files: []string{"../../" + filepath.Base(secret)}},
+	} {
+		resps, err = readAll(req)
+		for _, r := range resps {
+			if r.Exists && r.Error == "" {
+				t.Fatalf("request %+v read %q from outside the drive", req, r.Data)
+			}
+		}
+		if err == nil {
+			t.Fatalf("request %+v: expected an error", req)
+		}
 	}
 }
