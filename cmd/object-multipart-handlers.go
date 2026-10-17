@@ -735,6 +735,16 @@ func (api objectAPIHandlers) PutObjectPartHandler(w http.ResponseWriter, r *http
 		return
 	}
 
+	// Parts of an upload under an object lock retention period need
+	// an integrity header, like PutObject.
+	if objectlock.RetMode(mi.UserDefined[strings.ToLower(xhttp.AmzObjectLockMode)]).Valid() &&
+		mi.UserDefined[ReservedMetadataPrefixLower+ReplicaStatus] != replication.Replica.String() {
+		if s3Err := checkObjectLockIntegrityHeaders(r); s3Err != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
+	}
+
 	// Read compression metadata preserved in the init multipart for the decision.
 	_, isCompressed := mi.UserDefined[ReservedMetadataPrefix+"compression"]
 	var idxCb func() []byte
