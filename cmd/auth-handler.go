@@ -415,6 +415,18 @@ func authenticateRequest(ctx context.Context, r *http.Request, action policy.Act
 	return s3Err
 }
 
+// getConditionValuesWithVID is getConditionValues, with versionID (when
+// non-empty) used as the s3:versionid condition value. This is needed for
+// DeleteMultipleObjects, where the version of each object comes from the
+// request body rather than from the request URL.
+func getConditionValuesWithVID(r *http.Request, lc string, cred auth.Credentials, versionID string) map[string][]string {
+	m := getConditionValues(r, lc, cred)
+	if versionID != "" {
+		m["versionid"] = []string{versionID}
+	}
+	return m
+}
+
 func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action) (s3Err APIErrorCode) {
 	reqInfo := logger.GetReqInfo(ctx)
 	if reqInfo == nil {
@@ -435,7 +447,7 @@ func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action
 			Groups:          cred.Groups,
 			Action:          action,
 			BucketName:      bucket,
-			ConditionValues: getConditionValues(r, region, auth.AnonymousCredentials),
+			ConditionValues: getConditionValuesWithVID(r, region, auth.AnonymousCredentials, versionID),
 			IsOwner:         false,
 			ObjectName:      object,
 		}) {
@@ -451,7 +463,7 @@ func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action
 				Groups:          cred.Groups,
 				Action:          policy.ListBucketAction,
 				BucketName:      bucket,
-				ConditionValues: getConditionValues(r, region, auth.AnonymousCredentials),
+				ConditionValues: getConditionValuesWithVID(r, region, auth.AnonymousCredentials, versionID),
 				IsOwner:         false,
 				ObjectName:      object,
 			}) {
@@ -468,7 +480,7 @@ func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action
 			Groups:          cred.Groups,
 			Action:          policy.Action(policy.DeleteObjectVersionAction),
 			BucketName:      bucket,
-			ConditionValues: getConditionValues(r, "", cred),
+			ConditionValues: getConditionValuesWithVID(r, "", cred, versionID),
 			ObjectName:      object,
 			IsOwner:         owner,
 			Claims:          cred.Claims,
@@ -482,7 +494,7 @@ func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action
 		Groups:          cred.Groups,
 		Action:          action,
 		BucketName:      bucket,
-		ConditionValues: getConditionValues(r, "", cred),
+		ConditionValues: getConditionValuesWithVID(r, "", cred, versionID),
 		ObjectName:      object,
 		IsOwner:         owner,
 		Claims:          cred.Claims,
@@ -499,7 +511,7 @@ func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action
 			Groups:          cred.Groups,
 			Action:          policy.ListBucketAction,
 			BucketName:      bucket,
-			ConditionValues: getConditionValues(r, "", cred),
+			ConditionValues: getConditionValuesWithVID(r, "", cred, versionID),
 			ObjectName:      object,
 			IsOwner:         owner,
 			Claims:          cred.Claims,

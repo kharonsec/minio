@@ -136,9 +136,14 @@ func getConditionValues(r *http.Request, lc string, cred auth.Credentials) map[s
 		"principaltype":    {principalType},
 		"userid":           {username},
 		"username":         {username},
-		"versionid":        {vid},
 		"signatureversion": {signatureVersion},
 		"authType":         {authtype},
+	}
+
+	// Only set versionid when present so that a "Null" condition
+	// on s3:versionid can tell the two cases apart.
+	if vid != "" {
+		args["versionid"] = []string{vid}
 	}
 
 	if lc != "" {
