@@ -274,6 +274,7 @@ const (
 	ErrBucketMetadataNotInitialized
 	ErrRequestTimedout
 	ErrClientDisconnected
+	ErrServerShuttingDown
 	ErrTooManyRequests
 	ErrInvalidRequest
 	ErrTransitionStorageClassNotFoundError
@@ -1508,6 +1509,11 @@ var errorCodes = errorCodeMap{
 		Description:    "Client disconnected before response was ready",
 		HTTPStatusCode: 499, // No official code, use nginx value.
 	},
+	ErrServerShuttingDown: {
+		Code:           "ServiceUnavailable",
+		Description:    "Server is shutting down, please retry the request.",
+		HTTPStatusCode: http.StatusServiceUnavailable,
+	},
 	ErrTooManyRequests: {
 		Code:           "TooManyRequests",
 		Description:    "Please reduce your request rate",
@@ -2162,6 +2168,11 @@ func toAPIErrorCode(ctx context.Context, err error) (apiErr APIErrorCode) {
 	// Only return ErrClientDisconnected if the provided context is actually canceled.
 	// This way downstream context.Canceled will still report ErrRequestTimedout
 	if contextCanceled(ctx) && errors.Is(ctx.Err(), context.Canceled) {
+		if contextCanceled(GlobalContext) {
+			// Request contexts derive from GlobalContext, which is canceled
+			// when the server shuts down: the client did not disconnect.
+			return ErrServerShuttingDown
+		}
 		return ErrClientDisconnected
 	}
 
@@ -2254,6 +2265,9 @@ func toAPIErrorCode(ctx context.Context, err error) (apiErr APIErrorCode) {
 		apiErr = ErrKMSDefaultKeyAlreadyConfigured
 	case context.Canceled:
 		apiErr = ErrClientDisconnected
+		if contextCanceled(GlobalContext) {
+			apiErr = ErrServerShuttingDown
+		}
 	case context.DeadlineExceeded:
 		apiErr = ErrRequestTimedout
 	case objectlock.ErrInvalidRetentionDate:
