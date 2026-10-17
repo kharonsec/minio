@@ -18,6 +18,8 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"testing"
@@ -285,5 +287,70 @@ func TestReplicationResyncwrapper(t *testing.T) {
 		if sync := test.rcfg.resync(test.info, test.dsc, test.tgtStatuses); sync.mustResync() != test.expectedSync {
 			t.Errorf("%s (%s): Replicationresync  got %t , want %t", fmt.Sprintf("Test%d - %s", i+1, time.Now().Format(http.TimeFormat)), test.name, sync.mustResync(), test.expectedSync)
 		}
+	}
+}
+
+// Regression test for https://github.com/minio/minio/issues/20979:
+// delete markers saved to the MRF, e.g. because the target was offline,
+// must be queued for replication healing again.
+func TestHealMRFEntriesDeleteMarker(t *testing.T) {
+	ctx := t.Context()
+	objLayer, fsDirs, err := prepareErasure16(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer objLayer.Shutdown(t.Context())
+	defer removeRoots(fsDirs)
+	setObjectLayer(objLayer)
+
+	bucket := getRandomBucketName()
+	if err = objLayer.MakeBucket(ctx, bucket, MakeBucketOptions{VersioningEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	globalBucketMetadataSys.Update(ctx, bucket, bucketVersioningConfig, []byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`))
+
+	data := []byte("hello")
+	put := func(object string) ObjectInfo {
+		oi, err := objLayer.PutObject(ctx, bucket, object, mustGetPutObjReader(t, bytes.NewReader(data), int64(len(data)), "", ""), ObjectOptions{Versioned: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return oi
+	}
+	obj := put("object")
+	put("deleted")
+	dm, err := objLayer.DeleteObject(ctx, bucket, "deleted", ObjectOptions{Versioned: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dm.DeleteMarker {
+		t.Fatal("expected a delete marker")
+	}
+
+	entries := map[string]MRFReplicateEntry{
+		obj.VersionID: {Bucket: bucket, Object: "object", RetryCount: 1},
+		dm.VersionID:  {Bucket: bucket, Object: "deleted", RetryCount: 2},
+		mustGetUUID(): {Bucket: bucket, Object: "missing"},
+	}
+
+	queued := make(map[string]ObjectInfo)
+	retries := make(map[string]int)
+	p := &ReplicationPool{ctx: ctx, objLayer: objLayer}
+	p.healMRFEntries(entries, func(_ context.Context, b string, oi ObjectInfo, retryCount int) {
+		if b != bucket {
+			t.Errorf("unexpected bucket %q", b)
+		}
+		queued[oi.VersionID] = oi
+		retries[oi.VersionID] = retryCount
+	})
+
+	if len(queued) != 2 {
+		t.Fatalf("expected 2 entries to be queued for healing, got %d: %v", len(queued), queued)
+	}
+	if oi, ok := queued[obj.VersionID]; !ok || oi.DeleteMarker || oi.Name != "object" || retries[obj.VersionID] != 1 {
+		t.Errorf("object version not queued as expected: %+v", oi)
+	}
+	if oi, ok := queued[dm.VersionID]; !ok || !oi.DeleteMarker || oi.Name != "deleted" || retries[dm.VersionID] != 2 {
+		t.Errorf("delete marker not queued as expected: %+v", oi)
 	}
 }

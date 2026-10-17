@@ -18,6 +18,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
@@ -25,6 +26,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestGetHistogramMetrics_BucketCount(t *testing.T) {
@@ -242,5 +245,95 @@ func TestRegisterOptionalCollector(t *testing.T) {
 	}
 	if len(mfs) != 1 || mfs[0].GetName() != "test_counter" {
 		t.Fatalf("unexpected metric families: %v", mfs)
+	}
+}
+
+// metricsV2Collector exports MetricV2 values the way the cluster and
+// bucket collectors do.
+type metricsV2Collector []MetricV2
+
+func (metricsV2Collector) Describe(chan<- *prometheus.Desc) {}
+
+func (c metricsV2Collector) Collect(ch chan<- prometheus.Metric) {
+	for _, metric := range c {
+		labels, values := getOrderedLabelValueArrays(metric.VariableLabels)
+		collectMetric(metric, labels, values, "test", ch)
+	}
+}
+
+// Regression test for https://github.com/minio/minio/issues/17060:
+// the TTFB distribution must be exported as a Prometheus histogram.
+func TestTTFBDistributionIsHistogram(t *testing.T) {
+	newHist := func() *prometheus.HistogramVec {
+		return prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "s3_ttfb_seconds",
+			Help:    "Time taken by requests served by current MinIO server instance",
+			Buckets: []float64{.05, .5, 5},
+		}, []string{"api"})
+	}
+	hist := newHist()
+	for _, v := range []float64{0.02, 0.61} {
+		hist.WithLabelValues("PutObject").Observe(v)
+	}
+	for _, v := range []float64{0.19, 0.31, 6.79} {
+		hist.WithLabelValues("CopyObject").Observe(v)
+	}
+
+	desc := getS3TTFBDistributionMD()
+	if desc.Type != histogramMetric {
+		t.Fatalf("expected metric type %v, got %v", histogramMetric, desc.Type)
+	}
+	metrics := getPromHistogramMetrics(hist, desc, true, false)
+	if len(metrics) != 2 {
+		t.Fatalf("expected one metric per api, got %d", len(metrics))
+	}
+
+	const expected = `
+# HELP minio_s3_requests_ttfb_seconds_distribution Distribution of time to first byte across API calls
+# TYPE minio_s3_requests_ttfb_seconds_distribution histogram
+minio_s3_requests_ttfb_seconds_distribution_bucket{api="copyobject",le="0.05"} 0
+minio_s3_requests_ttfb_seconds_distribution_bucket{api="copyobject",le="0.5"} 2
+minio_s3_requests_ttfb_seconds_distribution_bucket{api="copyobject",le="5"} 2
+minio_s3_requests_ttfb_seconds_distribution_bucket{api="copyobject",le="+Inf"} 3
+minio_s3_requests_ttfb_seconds_distribution_sum{api="copyobject"} 7.29
+minio_s3_requests_ttfb_seconds_distribution_count{api="copyobject"} 3
+minio_s3_requests_ttfb_seconds_distribution_bucket{api="putobject",le="0.05"} 1
+minio_s3_requests_ttfb_seconds_distribution_bucket{api="putobject",le="0.5"} 1
+minio_s3_requests_ttfb_seconds_distribution_bucket{api="putobject",le="5"} 2
+minio_s3_requests_ttfb_seconds_distribution_bucket{api="putobject",le="+Inf"} 2
+minio_s3_requests_ttfb_seconds_distribution_sum{api="putobject"} 0.63
+minio_s3_requests_ttfb_seconds_distribution_count{api="putobject"} 2
+`
+	if err := testutil.CollectAndCompare(metricsV2Collector(metrics), strings.NewReader(expected)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The per node collector must export the same histogram, with the server label.
+	group := &MetricsGroupV2{}
+	group.RegisterRead(func(context.Context) []MetricV2 {
+		return getPromHistogramMetrics(hist, desc, true, false)
+	})
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(newMinioCollectorNode([]*MetricsGroupV2{group}))
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mfs) != 1 || mfs[0].GetType() != dto.MetricType_HISTOGRAM || len(mfs[0].GetMetric()) != 2 {
+		t.Fatalf("unexpected node metric families: %v", mfs)
+	}
+	var count uint64
+	for _, m := range mfs[0].GetMetric() {
+		var hasServer bool
+		for _, lp := range m.GetLabel() {
+			hasServer = hasServer || lp.GetName() == serverName
+		}
+		if !hasServer {
+			t.Fatalf("missing %s label: %v", serverName, m)
+		}
+		count += m.GetHistogram().GetSampleCount()
+	}
+	if count != 5 {
+		t.Fatalf("expected 5 samples, got %d", count)
 	}
 }

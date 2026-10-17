@@ -237,7 +237,7 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "sum by (bucket,le,api) (minio_bucket_requests_ttfb_seconds_distribution{job=~\"$scrape_jobs\"})",
+          "expr": "sum by (bucket,le,api) (minio_bucket_requests_ttfb_seconds_distribution_bucket{job=~\"$scrape_jobs\"})",
           "format": "time_series",
           "instant": false,
           "interval": "",

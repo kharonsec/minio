@@ -180,7 +180,7 @@ For deployments with [bucket](https://docs.min.io/community/minio-object-store/a
 | `minio_s3_requests_rejected_timestamp_total`  | Total number S3 requests rejected for invalid timestamp. |
 | `minio_s3_requests_total`                     | Total number S3 requests.                                |
 | `minio_s3_requests_waiting_total`             | Number of S3 requests in the waiting queue.              |
-| `minio_s3_requests_ttfb_seconds_distribution` | Distribution of the time to first byte across API calls. |
+| `minio_s3_requests_ttfb_seconds_distribution` | Distribution of the time to first byte across API calls (histogram: `_bucket`, `_sum` and `_count` series). |
 | `minio_s3_traffic_received_bytes`             | Total number of s3 bytes received.                       |
 | `minio_s3_traffic_sent_bytes`                 | Total number of s3 bytes sent.                           |
 
@@ -350,7 +350,7 @@ For deployments with [Site Replication](https://docs.min.io/community/minio-obje
 | `minio_bucket_requests_inflight_total`            | Total number of S3 requests currently in flight on a bucket.    |
 | `minio_bucket_requests_total`                     | Total number of S3 requests on a bucket.                        |
 | `minio_bucket_requests_canceled_total`            | Total number S3 requests canceled by the client.                |
-| `minio_bucket_requests_ttfb_seconds_distribution` | Distribution of time to first byte across API calls per bucket. |
+| `minio_bucket_requests_ttfb_seconds_distribution` | Distribution of time to first byte across API calls per bucket (histogram: `_bucket`, `_sum` and `_count` series). |
 
 # Resource Metrics
 
