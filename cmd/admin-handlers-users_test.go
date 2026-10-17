@@ -213,6 +213,7 @@ func TestIAMInternalIDPServerSuite(t *testing.T) {
 				suite.TestServiceAccountOpsByUser(c)
 				suite.TestServiceAccountDurationSecondsCondition(c)
 				suite.TestAddServiceAccountPerms(c)
+				suite.TestSetStatusPermissions(c)
 				suite.TearDownSuite(c)
 			},
 		)
@@ -898,6 +899,72 @@ func (s *TestSuiteIAM) TestGroupAddRemove(c *check) {
 	_, err = s.adm.GetGroupDescription(ctx, group)
 	if err == nil {
 		c.Fatalf("group appears to exist")
+	}
+}
+
+// TestSetStatusPermissions verifies that disabling a user or group needs
+// the Disable* admin action and enabling needs the Enable* one.
+func (s *TestSuiteIAM) TestSetStatusPermissions(c *check) {
+	ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
+	defer cancel()
+
+	policy := "disable-only"
+	policyBytes := []byte(`{
+ "Version": "2012-10-17",
+ "Statement": [
+  {
+   "Effect": "Allow",
+   "Action": ["admin:DisableUser", "admin:DisableGroup"]
+  }
+ ]
+}`)
+	if err := s.adm.AddCannedPolicy(ctx, policy, policyBytes); err != nil {
+		c.Fatalf("policy add error: %v", err)
+	}
+
+	accessKey, secretKey := mustGenerateCredentials(c)
+	if err := s.adm.SetUser(ctx, accessKey, secretKey, madmin.AccountEnabled); err != nil {
+		c.Fatalf("Unable to set user: %v", err)
+	}
+	if _, err := s.adm.AttachPolicy(ctx, madmin.PolicyAssociationReq{
+		Policies: []string{policy},
+		User:     accessKey,
+	}); err != nil {
+		c.Fatalf("unable to attach policy: %v", err)
+	}
+
+	userAdmClient, err := madmin.NewWithOptions(s.endpoint, &madmin.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: s.secure,
+	})
+	if err != nil {
+		c.Fatalf("Err creating user admin client: %v", err)
+	}
+	userAdmClient.SetCustomTransport(s.TestSuiteCommon.client.Transport)
+
+	target, targetSecret := mustGenerateCredentials(c)
+	if err = s.adm.SetUser(ctx, target, targetSecret, madmin.AccountEnabled); err != nil {
+		c.Fatalf("Unable to set user: %v", err)
+	}
+	if err = userAdmClient.SetUserStatus(ctx, target, madmin.AccountDisabled); err != nil {
+		c.Fatalf("user with admin:DisableUser could not disable a user: %v", err)
+	}
+	if err = userAdmClient.SetUserStatus(ctx, target, madmin.AccountEnabled); err == nil {
+		c.Fatalf("user without admin:EnableUser could enable a user")
+	}
+
+	group := "status-test-group"
+	if err = s.adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{
+		Group:   group,
+		Members: []string{target},
+	}); err != nil {
+		c.Fatalf("unable to create group: %v", err)
+	}
+	if err = userAdmClient.SetGroupStatus(ctx, group, madmin.GroupDisabled); err != nil {
+		c.Fatalf("user with admin:DisableGroup could not disable a group: %v", err)
+	}
+	if err = userAdmClient.SetGroupStatus(ctx, group, madmin.GroupEnabled); err == nil {
+		c.Fatalf("user without admin:EnableGroup could enable a group")
 	}
 }
 
