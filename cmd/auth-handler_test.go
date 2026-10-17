@@ -31,6 +31,7 @@ import (
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio/internal/auth"
 	xhttp "github.com/minio/minio/internal/http"
+	"github.com/minio/mux"
 	"github.com/minio/pkg/v3/policy"
 )
 
@@ -607,4 +608,69 @@ func mustUnescape(t *testing.T, s string) string {
 		t.Fatal(err)
 	}
 	return u
+}
+
+func TestStripUnauthorizedReplicationHeaders(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	objLayer, fsDir, err := prepareFS(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(fsDir)
+
+	if err = newTestConfig(globalMinioDefaultRegion, objLayer); err != nil {
+		t.Fatalf("unable initialize config file, %s", err)
+	}
+
+	initAllSubsystems(ctx)
+
+	initConfigSubsystem(ctx, objLayer)
+
+	creds, err := auth.CreateCredentials("admin", "mypassword")
+	if err != nil {
+		t.Fatalf("unable create credential, %s", err)
+	}
+	globalActiveCred = creds
+
+	globalIAMSys.Init(ctx, objLayer, globalEtcdClient, 2*time.Second)
+
+	_, err = globalIAMSys.CreateUser(ctx, "lowprivuser", madmin.AddOrUpdateUserReq{
+		SecretKey: "lowprivpassword",
+		Status:    madmin.AccountEnabled,
+	})
+	if err != nil {
+		t.Fatalf("unable create user, %s", err)
+	}
+
+	newReq := func(accessKey, secretKey string) *http.Request {
+		req := mustNewRequest(http.MethodPut, "http://localhost:9000/bucket/object", 0, nil, t)
+		req.Header.Set(xhttp.MinIOSourceReplicationRequest, "true")
+		req.Header.Set(xhttp.MinIOSourceMTime, UTCNow().Format(time.RFC3339Nano))
+		if err := signRequestV4(req, accessKey, secretKey); err != nil {
+			t.Fatal(err)
+		}
+		return mux.SetURLVars(req, map[string]string{"bucket": "bucket", "object": "object"})
+	}
+
+	req := newReq("lowprivuser", "lowprivpassword")
+	stripUnauthorizedReplicationHeaders(req)
+	if req.Header.Get(xhttp.MinIOSourceReplicationRequest) != "" || req.Header.Get(xhttp.MinIOSourceMTime) != "" {
+		t.Fatal("replication headers from a user without replication permissions were kept")
+	}
+
+	req = newReq("admin", "mypassword")
+	stripUnauthorizedReplicationHeaders(req)
+	if req.Header.Get(xhttp.MinIOSourceReplicationRequest) != "true" || req.Header.Get(xhttp.MinIOSourceMTime) == "" {
+		t.Fatal("replication headers from the root user were removed")
+	}
+
+	req = mustNewRequest(http.MethodPut, "http://localhost:9000/bucket/object", 0, nil, t)
+	req.Header.Set(xhttp.MinIOSourceReplicationRequest, "true")
+	req = mux.SetURLVars(req, map[string]string{"bucket": "bucket", "object": "object"})
+	stripUnauthorizedReplicationHeaders(req)
+	if req.Header.Get(xhttp.MinIOSourceReplicationRequest) != "" {
+		t.Fatal("replication headers from an anonymous request were kept")
+	}
 }

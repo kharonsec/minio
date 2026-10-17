@@ -33,7 +33,9 @@ import (
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/mcontext"
+	"github.com/minio/mux"
 	xnet "github.com/minio/pkg/v3/net"
+	"github.com/minio/pkg/v3/policy"
 )
 
 const (
@@ -242,6 +244,95 @@ func extractReplicationMetadata(h http.Header, m map[string]string) {
 			m[internalHeader] = strings.Join(value, ",")
 		}
 	}
+}
+
+// replicationOnlyHeaders are sent by bucket, site and batch replication.
+// They change how a request is processed (preserved mtime and ETag,
+// delete marker handling, raw SSE-C reads, no event notifications), so
+// they are only honored from callers allowed to replicate.
+var replicationOnlyHeaders = []string{
+	xhttp.MinIOSourceReplicationRequest,
+	xhttp.MinIOSourceReplicationCheck,
+	xhttp.MinIOSourceProxyRequest,
+	xhttp.MinIOSourceMTime,
+	xhttp.MinIOSourceETag,
+	xhttp.MinIOSourceDeleteMarker,
+	xhttp.MinIOSourceDeleteMarkerDelete,
+	xhttp.MinIOSourceTaggingTimestamp,
+	xhttp.MinIOSourceObjectRetentionTimestamp,
+	xhttp.MinIOSourceObjectLegalHoldTimestamp,
+	xhttp.MinIOReplicationActualObjectSize,
+}
+
+// replicationActions are the actions that allow a caller to send
+// replication requests to a bucket.
+var replicationActions = []policy.Action{
+	policy.ReplicateObjectAction,
+	policy.ReplicateDeleteAction,
+	policy.ReplicateTagsAction,
+}
+
+// stripUnauthorizedReplicationHeaders removes replication-only headers
+// from requests whose sender is not allowed to replicate to the bucket.
+// The request signature is verified later by the handler; a request that
+// claims another user's identity fails there.
+func stripUnauthorizedReplicationHeaders(r *http.Request) {
+	present := false
+	for _, h := range replicationOnlyHeaders {
+		if _, ok := r.Header[http.CanonicalHeaderKey(h)]; ok {
+			present = true
+			break
+		}
+	}
+	if !present || isReplicationAllowed(r) {
+		return
+	}
+	for _, h := range replicationOnlyHeaders {
+		r.Header.Del(h)
+	}
+}
+
+func isReplicationAllowed(r *http.Request) bool {
+	vars := mux.Vars(r)
+	bucket, object := vars["bucket"], vars["object"]
+	if bucket == "" {
+		return false
+	}
+	var (
+		cred  auth.Credentials
+		owner bool
+		s3Err APIErrorCode
+	)
+	switch getRequestAuthType(r) {
+	case authTypeSignedV2, authTypePresignedV2:
+		cred, owner, s3Err = getReqAccessKeyV2(r)
+	case authTypeSigned, authTypePresigned, authTypeStreamingSigned, authTypeStreamingSignedTrailer, authTypeStreamingUnsignedTrailer:
+		cred, owner, s3Err = getReqAccessKeyV4(r, globalSite.Region(), serviceS3)
+	default:
+		return false
+	}
+	if s3Err != ErrNone || cred.AccessKey == "" {
+		return false
+	}
+	if object != "" {
+		object, _ = unescapePath(object)
+	}
+	conditions := getConditionValues(r, "", cred)
+	for _, action := range replicationActions {
+		if globalIAMSys.IsAllowed(policy.Args{
+			AccountName:     cred.AccessKey,
+			Groups:          cred.Groups,
+			Action:          action,
+			BucketName:      bucket,
+			ConditionValues: conditions,
+			ObjectName:      object,
+			IsOwner:         owner,
+			Claims:          cred.Claims,
+		}) {
+			return true
+		}
+	}
+	return false
 }
 
 func getReqAccessCred(r *http.Request, region string) (cred auth.Credentials) {
