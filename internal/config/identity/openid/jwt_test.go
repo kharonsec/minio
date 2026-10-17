@@ -118,9 +118,9 @@ func TestJWTHMACType(t *testing.T) {
 
 	pubKeys := publicKeys{
 		RWMutex: &sync.RWMutex{},
-		pkMap:   map[string]any{},
+		pkMap:   map[publicKeyID]any{},
 	}
-	pubKeys.add("76b95ae5-33ef-4283-97b7-d2a85dc2d8f4", []byte("WNGvKVyyNmXq0TraSvjaDN9CtpFgx35IXtGEffMCPR0"))
+	pubKeys.add(DummyRoleARN, "76b95ae5-33ef-4283-97b7-d2a85dc2d8f4", []byte("WNGvKVyyNmXq0TraSvjaDN9CtpFgx35IXtGEffMCPR0"))
 
 	if len(pubKeys.pkMap) != 1 {
 		t.Fatalf("Expected 1 keys, got %d", len(pubKeys.pkMap))
@@ -166,9 +166,9 @@ func TestJWT(t *testing.T) {
 
 	pubKeys := publicKeys{
 		RWMutex: &sync.RWMutex{},
-		pkMap:   map[string]any{},
+		pkMap:   map[publicKeyID]any{},
 	}
-	err := pubKeys.parseAndAdd(bytes.NewBuffer([]byte(jsonkey)))
+	err := pubKeys.parseAndAdd(DummyRoleARN, bytes.NewBuffer([]byte(jsonkey)))
 	if err != nil {
 		t.Fatal("Error loading pubkeys:", err)
 	}
@@ -298,5 +298,23 @@ func TestKeycloakProviderInitialization(t *testing.T) {
 
 	if testConfig.provider == nil {
 		t.Errorf("keycloak provider must be initialized!")
+	}
+}
+
+func TestPublicKeysScopedToProvider(t *testing.T) {
+	otherARN, err := arn.NewIAMRoleARN("other-provider", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubKeys := publicKeys{
+		RWMutex: &sync.RWMutex{},
+		pkMap:   map[publicKeyID]any{},
+	}
+	pubKeys.add(DummyRoleARN, "kid-1", []byte("key"))
+	if pubKeys.get(DummyRoleARN, "kid-1") == nil {
+		t.Fatal("expected key for its own provider")
+	}
+	if pubKeys.get(otherARN, "kid-1") != nil {
+		t.Fatal("key of one provider must not be usable for another provider")
 	}
 }
