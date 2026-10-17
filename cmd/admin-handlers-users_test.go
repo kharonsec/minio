@@ -203,6 +203,7 @@ func TestIAMInternalIDPServerSuite(t *testing.T) {
 				suite.SetUpSuite(c)
 				suite.TestUserCreate(c)
 				suite.TestUserPolicyEscalationBug(c)
+				suite.TestSetUserGroupStatusActions(c)
 				suite.TestPolicyCreate(c)
 				suite.TestCannedPolicies(c)
 				suite.TestGroupAddRemove(c)
@@ -309,6 +310,89 @@ func (s *TestSuiteIAM) TestUserCreate(c *check) {
 	err = client.MakeBucket(ctx, getRandomBucketName(), minio.MakeBucketOptions{})
 	if err == nil {
 		c.Fatalf("user account was not deleted!")
+	}
+}
+
+// Regression test for https://github.com/minio/minio/issues/21478:
+// disabling a user (or group) must require admin:DisableUser (or
+// admin:DisableGroup), not admin:EnableUser (or admin:EnableGroup).
+func (s *TestSuiteIAM) TestSetUserGroupStatusActions(c *check) {
+	ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
+	defer cancel()
+
+	// Target user and group whose status gets changed.
+	target, targetSecret := mustGenerateCredentials(c)
+	if err := s.adm.SetUser(ctx, target, targetSecret, madmin.AccountEnabled); err != nil {
+		c.Fatalf("Unable to set user: %v", err)
+	}
+	group := "status-test-group"
+	if err := s.adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: group, Members: []string{target}}); err != nil {
+		c.Fatalf("Unable to add group: %v", err)
+	}
+
+	newAdmin := func(policyName string, actions ...string) *madmin.AdminClient {
+		quoted := make([]string, len(actions))
+		for i, a := range actions {
+			quoted[i] = fmt.Sprintf("%q", a)
+		}
+		policyBytes := fmt.Appendf(nil, `{
+ "Version": "2012-10-17",
+ "Statement": [{"Effect": "Allow", "Action": [%s]}]
+}`, strings.Join(quoted, ","))
+		if err := s.adm.AddCannedPolicy(ctx, policyName, policyBytes); err != nil {
+			c.Fatalf("policy add error: %v", err)
+		}
+		accessKey, secretKey := mustGenerateCredentials(c)
+		if err := s.adm.SetUser(ctx, accessKey, secretKey, madmin.AccountEnabled); err != nil {
+			c.Fatalf("Unable to set user: %v", err)
+		}
+		if _, err := s.adm.AttachPolicy(ctx, madmin.PolicyAssociationReq{
+			Policies: []string{policyName},
+			User:     accessKey,
+		}); err != nil {
+			c.Fatalf("unable to attach policy: %v", err)
+		}
+		return s.getAdminClient(c, accessKey, secretKey, "")
+	}
+
+	enableOnly := newAdmin("enable-only", "admin:EnableUser", "admin:EnableGroup")
+	disableOnly := newAdmin("disable-only", "admin:DisableUser", "admin:DisableGroup")
+
+	// admin:EnableUser alone must not allow disabling a user.
+	if err := enableOnly.SetUserStatus(ctx, target, madmin.AccountDisabled); err == nil {
+		c.Fatalf("user was disabled with only admin:EnableUser")
+	}
+	if err := disableOnly.SetUserStatus(ctx, target, madmin.AccountDisabled); err != nil {
+		c.Fatalf("unable to disable user with admin:DisableUser: %v", err)
+	}
+	// admin:DisableUser alone must not allow enabling a user.
+	if err := disableOnly.SetUserStatus(ctx, target, madmin.AccountEnabled); err == nil {
+		c.Fatalf("user was enabled with only admin:DisableUser")
+	}
+	if err := enableOnly.SetUserStatus(ctx, target, madmin.AccountEnabled); err != nil {
+		c.Fatalf("unable to enable user with admin:EnableUser: %v", err)
+	}
+
+	// Same for groups.
+	if err := enableOnly.SetGroupStatus(ctx, group, madmin.GroupDisabled); err == nil {
+		c.Fatalf("group was disabled with only admin:EnableGroup")
+	}
+	if err := disableOnly.SetGroupStatus(ctx, group, madmin.GroupDisabled); err != nil {
+		c.Fatalf("unable to disable group with admin:DisableGroup: %v", err)
+	}
+	if err := disableOnly.SetGroupStatus(ctx, group, madmin.GroupEnabled); err == nil {
+		c.Fatalf("group was enabled with only admin:DisableGroup")
+	}
+	if err := enableOnly.SetGroupStatus(ctx, group, madmin.GroupEnabled); err != nil {
+		c.Fatalf("unable to enable group with admin:EnableGroup: %v", err)
+	}
+
+	// Clean up so the group does not show up in later tests.
+	if err := s.adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: group, Members: []string{target}, IsRemove: true}); err != nil {
+		c.Fatalf("Unable to remove group member: %v", err)
+	}
+	if err := s.adm.UpdateGroupMembers(ctx, madmin.GroupAddRemove{Group: group, IsRemove: true}); err != nil {
+		c.Fatalf("Unable to remove group: %v", err)
 	}
 }
 
