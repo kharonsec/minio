@@ -33,6 +33,7 @@ import (
 
 	"github.com/klauspost/readahead"
 	"github.com/minio/minio-go/v7/pkg/set"
+	"github.com/minio/minio/internal/bucket/replication"
 	"github.com/minio/minio/internal/config/storageclass"
 	"github.com/minio/minio/internal/crypto"
 	"github.com/minio/minio/internal/hash"
@@ -1358,9 +1359,13 @@ func (er erasureObjects) CompleteMultipartUpload(ctx context.Context, bucket str
 		}
 	}
 
+	// Replication headers set internal object state, only trust them for
+	// uploads created by an authorized replication request.
+	isReplica := fi.Metadata[ReservedMetadataPrefixLower+ReplicaStatus] == replication.Replica.String()
+
 	// Accept encrypted checksum from incoming request.
 	if opts.UserDefined[ReplicationSsecChecksumHeader] != "" {
-		if v, err := base64.StdEncoding.DecodeString(opts.UserDefined[ReplicationSsecChecksumHeader]); err == nil {
+		if v, err := base64.StdEncoding.DecodeString(opts.UserDefined[ReplicationSsecChecksumHeader]); err == nil && isReplica {
 			fi.Checksum = v
 		}
 		delete(opts.UserDefined, ReplicationSsecChecksumHeader)
@@ -1399,7 +1404,7 @@ func (er erasureObjects) CompleteMultipartUpload(ctx context.Context, bucket str
 	}
 
 	// Save the consolidated actual size.
-	if opts.ReplicationRequest {
+	if opts.ReplicationRequest && isReplica {
 		if v := opts.UserDefined[ReservedMetadataPrefix+"Actual-Object-Size"]; v != "" {
 			fi.Metadata[ReservedMetadataPrefix+"actual-size"] = v
 		}

@@ -152,6 +152,19 @@ func TestExtractMetadataHeaders(t *testing.T) {
 			},
 			shouldFail: false,
 		},
+		// Replication headers must not set internal metadata
+		// on regular requests.
+		{
+			header: http.Header{
+				"X-Minio-Replication-Server-Side-Encryption-Sealed-Key":     []string{"Zm9v"},
+				"X-Minio-Replication-Server-Side-Encryption-Seal-Algorithm": []string{"DARE-SHA256"},
+				"X-Minio-Replication-Server-Side-Encryption-Iv":             []string{"YmFy"},
+				"X-Minio-Replication-Actual-Object-Size":                    []string{"1"},
+				ReplicationSsecChecksumHeader:                               []string{"Zm9v"},
+			},
+			metadata:   map[string]string{},
+			shouldFail: false,
+		},
 		// Empty header input returns empty metadata.
 		{
 			header:     nil,
@@ -173,6 +186,22 @@ func TestExtractMetadataHeaders(t *testing.T) {
 		if err == nil && !reflect.DeepEqual(metadata, testCase.metadata) {
 			t.Fatalf("Test %d failed: Expected \"%#v\", got \"%#v\"", i+1, testCase.metadata, metadata)
 		}
+	}
+}
+
+func TestExtractReplicationMetadata(t *testing.T) {
+	metadata := make(map[string]string)
+	extractReplicationMetadata(http.Header{
+		"X-Minio-Replication-Server-Side-Encryption-Sealed-Key": []string{"Zm9v"},
+		"X-Minio-Replication-Actual-Object-Size":                []string{"1"},
+		"Content-Type":                                          []string{"image/png"},
+	}, metadata)
+	want := map[string]string{
+		"X-Minio-Internal-Server-Side-Encryption-Sealed-Key": "Zm9v",
+		"X-Minio-Internal-Actual-Object-Size":                "1",
+	}
+	if !reflect.DeepEqual(metadata, want) {
+		t.Fatalf("Expected %#v, got %#v", want, metadata)
 	}
 }
 

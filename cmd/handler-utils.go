@@ -205,13 +205,14 @@ func extractMetadataFromMime(ctx context.Context, v textproto.MIMEHeader, m map[
 
 	// Save all supported headers.
 	for _, supportedHeader := range supportedHeaders {
+		if _, ok := replicationToInternalHeaders[supportedHeader]; ok {
+			// Only accepted from authorized replication requests,
+			// see extractReplicationMetadata.
+			continue
+		}
 		value, ok := nv[http.CanonicalHeaderKey(supportedHeader)]
 		if ok {
-			if v, ok := replicationToInternalHeaders[supportedHeader]; ok {
-				m[v] = strings.Join(value, ",")
-			} else {
-				m[supportedHeader] = strings.Join(value, ",")
-			}
+			m[supportedHeader] = strings.Join(value, ",")
 		}
 	}
 
@@ -231,6 +232,18 @@ func extractMetadataFromMime(ctx context.Context, v textproto.MIMEHeader, m map[
 }
 
 // Returns access credentials in the request Authorization header.
+// extractReplicationMetadata maps the replication headers sent by a
+// replication source (such as the sealed SSE-C key) to internal metadata.
+// These headers set internal encryption state, so the caller must have
+// verified that the request is allowed to replicate objects.
+func extractReplicationMetadata(h http.Header, m map[string]string) {
+	for replHeader, internalHeader := range replicationToInternalHeaders {
+		if value, ok := h[http.CanonicalHeaderKey(replHeader)]; ok {
+			m[internalHeader] = strings.Join(value, ",")
+		}
+	}
+}
+
 func getReqAccessCred(r *http.Request, region string) (cred auth.Credentials) {
 	cred, _, _ = getReqAccessKeyV4(r, region, serviceS3)
 	if cred.AccessKey == "" {
