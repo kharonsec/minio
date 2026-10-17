@@ -152,6 +152,31 @@ MINIO_ROOT_PASSWORD=minio123`,
 				},
 			},
 		},
+		// Spaces around the separator and the value
+		// (https://github.com/minio/minio/issues/21682)
+		{
+			"MINIO_ROOT_USER = minio\nexport MINIO_ROOT_PASSWORD =  \"minio123\"  \nMINIO_VOLUMES= \" /data \"\t",
+			false,
+			[]envKV{
+				{
+					Key:   "MINIO_ROOT_USER",
+					Value: "minio",
+				},
+				{
+					Key:   "MINIO_ROOT_PASSWORD",
+					Value: "minio123",
+				},
+				{
+					Key:   "MINIO_VOLUMES",
+					Value: " /data ",
+				},
+			},
+		},
+		{
+			` = minio`,
+			true,
+			nil,
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run("", func(t *testing.T) {
