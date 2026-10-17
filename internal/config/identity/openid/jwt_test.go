@@ -145,9 +145,11 @@ func TestJWTHMACType(t *testing.T) {
 		},
 	}
 
+	// HMAC tokens are keyed with the client secret, which clients know,
+	// so they must be rejected.
 	var claims jwtgo.MapClaims
-	if err = cfg.Validate(t.Context(), DummyRoleARN, token, "", "", claims); err != nil {
-		t.Fatal(err)
+	if err = cfg.Validate(t.Context(), DummyRoleARN, token, "", "", claims); err == nil {
+		t.Fatal("HMAC signed token signed with the client secret was accepted")
 	}
 }
 

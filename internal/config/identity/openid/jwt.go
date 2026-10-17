@@ -79,9 +79,6 @@ func (r *Config) PopulatePublicKey(arn arn.ARN) error {
 		return nil
 	}
 
-	// Add client secret for the client ID for HMAC based signature.
-	r.pubKeys.add(pCfg.ClientID, []byte(pCfg.ClientSecret))
-
 	client := &http.Client{
 		Transport: r.transport,
 	}
@@ -134,11 +131,13 @@ const (
 
 // Validate - validates the id_token.
 func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, dsecs string, claims map[string]any) error {
+	// Only asymmetric signatures from the provider's JWKS are accepted.
+	// HMAC signatures would be keyed with the client secret, which client
+	// applications hold, letting them forge tokens for any identity.
 	jp := new(jwtgo.Parser)
 	jp.ValidMethods = []string{
 		"RS256", "RS384", "RS512",
 		"ES256", "ES384", "ES512",
-		"HS256", "HS384", "HS512",
 		"RS3256", "RS3384", "RS3512",
 		"ES3256", "ES3384", "ES3512",
 	}
@@ -168,7 +167,7 @@ func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, 
 		if err = r.PopulatePublicKey(arn); err != nil {
 			return err
 		}
-		jwtToken, err = jwtgo.ParseWithClaims(token, &mclaims, keyFuncCallback)
+		jwtToken, err = jp.ParseWithClaims(token, &mclaims, keyFuncCallback)
 		if err != nil {
 			return err
 		}
