@@ -3723,23 +3723,29 @@ func (p *ReplicationPool) queueMRFHeal() error {
 	}
 
 	// queue replication heal in a goroutine to avoid holding up mrf save routine
-	go func() {
-		for vID, e := range mrfRec.Entries {
-			ctx, cancel := context.WithTimeout(p.ctx, time.Second) // Do not waste more than a second on this.
-
-			oi, err := p.objLayer.GetObjectInfo(ctx, e.Bucket, e.Object, ObjectOptions{
-				VersionID: vID,
-			})
-			cancel()
-			if err != nil {
-				continue
-			}
-
-			QueueReplicationHeal(p.ctx, e.Bucket, oi, e.RetryCount)
-		}
-	}()
+	go p.healMRFEntries(mrfRec.Entries, QueueReplicationHeal)
 
 	return nil
+}
+
+// healMRFEntries looks up the object version of each MRF entry, keyed by
+// version ID, and passes it to queueHeal.
+func (p *ReplicationPool) healMRFEntries(entries map[string]MRFReplicateEntry, queueHeal func(ctx context.Context, bucket string, oi ObjectInfo, retryCount int)) {
+	for vID, e := range entries {
+		ctx, cancel := context.WithTimeout(p.ctx, time.Second) // Do not waste more than a second on this.
+
+		oi, err := p.objLayer.GetObjectInfo(ctx, e.Bucket, e.Object, ObjectOptions{
+			VersionID: vID,
+		})
+		cancel()
+		// GetObjectInfo returns the object info of a delete marker version
+		// along with errMethodNotAllowed: its replication must be healed too.
+		if err != nil && (!isErrMethodNotAllowed(err) || !oi.DeleteMarker) {
+			continue
+		}
+
+		queueHeal(p.ctx, e.Bucket, oi, e.RetryCount)
+	}
 }
 
 func (p *ReplicationPool) initialized() bool {
