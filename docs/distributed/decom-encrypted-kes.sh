@@ -9,8 +9,7 @@ pkill kes
 rm -rf /tmp/xl
 
 if [ ! -f ./mc ]; then
-	wget --quiet -O mc https://dl.minio.io/client/mc/release/linux-amd64/mc &&
-		chmod +x mc
+	"$(dirname "${BASH_SOURCE[0]}")/../../buildscripts/install-mc.sh" mc
 fi
 
 if [ ! -f ./kes ]; then

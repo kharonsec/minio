@@ -28,8 +28,7 @@ if [ ! -f ./mc ]; then
 		;;
 	esac
 
-	wget -O mc https://dl.minio.io/client/mc/release/${os,,}-${arch,,}/mc &&
-		chmod +x mc
+	"$(dirname "${BASH_SOURCE[0]}")/../../buildscripts/install-mc.sh" mc
 fi
 
 for i in $(seq 1 4); do

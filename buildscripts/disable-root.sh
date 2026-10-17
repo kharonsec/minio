@@ -25,8 +25,7 @@ done
 sleep 10s
 
 if [ ! -f ./mc ]; then
-	wget --quiet -O ./mc https://dl.minio.io/client/mc/release/linux-amd64/./mc &&
-		chmod +x mc
+	"$(dirname "${BASH_SOURCE[0]}")/install-mc.sh" mc
 fi
 
 set +e

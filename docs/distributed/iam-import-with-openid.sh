@@ -16,8 +16,7 @@ export MC_HOST_myminio1="http://dillon-service-2:dillon-service-2@localhost:2200
 export CI=true
 
 if [ ! -f ./mc ]; then
-	wget --quiet -O mc https://dl.minio.io/client/mc/release/linux-amd64/mc &&
-		chmod +x mc
+	"$(dirname "${BASH_SOURCE[0]}")/../../buildscripts/install-mc.sh" mc
 fi
 
 mc -v

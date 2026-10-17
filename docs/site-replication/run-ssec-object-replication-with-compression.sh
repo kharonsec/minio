@@ -44,9 +44,8 @@ minio server --certs-dir /tmp/certs --address ":9002" --console-address ":11000"
 echo "done"
 
 if [ ! -f ./mc ]; then
-	echo -n "Downloading MinIO client ..."
-	wget -O mc https://dl.min.io/client/mc/release/linux-amd64/mc &&
-		chmod +x mc
+	echo -n "Building MinIO client ..."
+	"$(dirname "${BASH_SOURCE[0]}")/../../buildscripts/install-mc.sh" mc
 	echo "done"
 fi
 
