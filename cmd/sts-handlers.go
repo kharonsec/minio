@@ -34,6 +34,7 @@ import (
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio/internal/auth"
 	"github.com/minio/minio/internal/config/identity/openid"
+	"github.com/minio/minio/internal/handlers"
 	"github.com/minio/minio/internal/hash/sha256"
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
@@ -690,8 +691,15 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 		return
 	}
 
+	clientIP := handlers.GetSourceIP(r)
+	if globalLDAPLoginLimiter.blocked(ldapUsername, clientIP) {
+		writeSTSErrorResponse(ctx, w, ErrSTSTooManyRequests, errors.New("too many failed LDAP login attempts"))
+		return
+	}
+
 	lookupResult, groupDistNames, err := globalIAMSys.LDAPConfig.Bind(ldapUsername, ldapPassword)
 	if err != nil {
+		globalLDAPLoginLimiter.failed(ldapUsername, clientIP)
 		// Do not reveal whether the user exists or their DN to the
 		// client, which allows enumerating users.
 		authNLogIf(ctx, fmt.Errorf("LDAP server error: %w", err))
