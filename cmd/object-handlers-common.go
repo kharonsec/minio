@@ -340,13 +340,24 @@ func canonicalizeETag(etag string) string {
 	return etagRegex.ReplaceAllString(etag, "$1")
 }
 
-// isETagEqual return true if the canonical representations of two ETag strings
-// are equal, false otherwise
+// isETagEqual returns true if the canonical representation of the ETag left
+// is equal to the canonical representation of any ETag in right, false
+// otherwise. right may be "*", which matches any ETag, or a comma-separated
+// list of ETags as sent in If-Match and If-None-Match headers. Weak ETags
+// (W/"...") are compared by their opaque value.
 func isETagEqual(left, right string) bool {
-	if strings.TrimSpace(right) == "*" {
-		return true
+	left = canonicalizeETag(left)
+	for etag := range strings.SplitSeq(right, ",") {
+		etag = strings.TrimSpace(etag)
+		if etag == "*" {
+			return true
+		}
+		etag = strings.TrimPrefix(etag, "W/")
+		if canonicalizeETag(etag) == left {
+			return true
+		}
 	}
-	return canonicalizeETag(left) == canonicalizeETag(right)
+	return false
 }
 
 // setPutObjHeaders sets all the necessary headers returned back

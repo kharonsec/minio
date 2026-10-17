@@ -179,3 +179,73 @@ func TestCheckPreconditions(t *testing.T) {
 		})
 	}
 }
+
+// Regression test for https://github.com/minio/minio/issues/21727
+func TestIsETagEqual(t *testing.T) {
+	testCases := []struct {
+		etag   string
+		header string
+		want   bool
+	}{
+		{"aa", "aa", true},
+		{"aa", `"aa"`, true},
+		{"aa", "bb", false},
+		{"aa", "*", true},
+		{"aa", " * ", true},
+		{"aa", `"bb", "aa"`, true},
+		{"aa", `"bb","aa"`, true},
+		{"aa", `"bb" , "cc"`, false},
+		{"aa", `W/"aa"`, true},
+		{"aa", `"bb", W/"aa"`, true},
+		{"aa", `"bb", *`, true},
+		{"aa", "", false},
+		{"aa", ",", false},
+		{"aa-2", `"bb", "aa-2"`, true},
+	}
+	for _, tc := range testCases {
+		if got := isETagEqual(tc.etag, tc.header); got != tc.want {
+			t.Errorf("isETagEqual(%q, %q) = %v, want %v", tc.etag, tc.header, got, tc.want)
+		}
+	}
+}
+
+// Regression test for https://github.com/minio/minio/issues/21727
+func TestCheckPreconditionsETagList(t *testing.T) {
+	objInfo := ObjectInfo{ETag: "aa", ModTime: time.Date(2024, time.August, 26, 0o2, 0o1, 0o1, 0, time.UTC)}
+	testCases := []struct {
+		name         string
+		method       string
+		header       string
+		value        string
+		expectedFlag bool
+		expectedCode int
+	}{
+		{"GET If-None-Match list matches", http.MethodGet, xhttp.IfNoneMatch, `"bb", "aa"`, true, http.StatusNotModified},
+		{"GET If-None-Match list no match", http.MethodGet, xhttp.IfNoneMatch, `"bb", "cc"`, false, http.StatusOK},
+		{"GET If-Match list matches", http.MethodGet, xhttp.IfMatch, `"bb", "aa"`, false, http.StatusOK},
+		{"GET If-Match list no match", http.MethodGet, xhttp.IfMatch, `"bb", "cc"`, true, http.StatusPreconditionFailed},
+		{"PUT If-None-Match list matches", http.MethodPut, xhttp.IfNoneMatch, `"bb", "aa"`, true, http.StatusPreconditionFailed},
+		{"PUT If-None-Match list no match", http.MethodPut, xhttp.IfNoneMatch, `"bb", "cc"`, false, http.StatusOK},
+		{"PUT If-Match list matches", http.MethodPut, xhttp.IfMatch, `"bb", "aa"`, false, http.StatusOK},
+		{"PUT If-Match list no match", http.MethodPut, xhttp.IfMatch, `"bb", "cc"`, true, http.StatusPreconditionFailed},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(tc.method, "/bucket/a", bytes.NewReader([]byte{}))
+			request.Header.Set(tc.header, tc.value)
+			var flag bool
+			if tc.method == http.MethodPut {
+				flag = checkPreconditionsPUT(t.Context(), recorder, request, objInfo, ObjectOptions{})
+			} else {
+				flag = checkPreconditions(t.Context(), recorder, request, objInfo, ObjectOptions{})
+			}
+			if flag != tc.expectedFlag {
+				t.Errorf("got flag: %v, want: %v", flag, tc.expectedFlag)
+			}
+			if recorder.Code != tc.expectedCode {
+				t.Errorf("got code: %d, want: %d", recorder.Code, tc.expectedCode)
+			}
+		})
+	}
+}
