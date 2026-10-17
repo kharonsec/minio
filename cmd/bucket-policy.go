@@ -75,6 +75,17 @@ func getSTSConditionValues(r *http.Request, lc string, cred auth.Credentials) ma
 	return m
 }
 
+// getConditionValuesWithVID is getConditionValues for a request on a
+// specific object version, such as one object of a DeleteObjects request,
+// whose version ID is not in the request URL.
+func getConditionValuesWithVID(r *http.Request, lc string, cred auth.Credentials, versionID string) map[string][]string {
+	args := getConditionValues(r, lc, cred)
+	if versionID != "" {
+		args["versionid"] = []string{versionID}
+	}
+	return args
+}
+
 func getConditionValues(r *http.Request, lc string, cred auth.Credentials) map[string][]string {
 	currTime := UTCNow()
 
@@ -136,9 +147,14 @@ func getConditionValues(r *http.Request, lc string, cred auth.Credentials) map[s
 		"principaltype":    {principalType},
 		"userid":           {username},
 		"username":         {username},
-		"versionid":        {vid},
 		"signatureversion": {signatureVersion},
 		"authType":         {authtype},
+	}
+
+	// Only set when present, so that a Null condition on s3:versionid
+	// matches requests without a version ID.
+	if vid != "" {
+		args["versionid"] = []string{vid}
 	}
 
 	if lc != "" {
