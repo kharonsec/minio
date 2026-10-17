@@ -24,10 +24,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio/internal/auth"
+	xhttp "github.com/minio/minio/internal/http"
+	"github.com/minio/mux"
 	"github.com/minio/pkg/v3/policy"
 )
 
@@ -497,5 +501,176 @@ func TestValidateAdminSignature(t *testing.T) {
 		if s3Error != testCase.ErrCode {
 			t.Errorf("Test %d: Unexpected s3error returned wanted %d, got %d", i+1, testCase.ErrCode, s3Error)
 		}
+	}
+}
+
+// A request signed in the Authorization header must be attributed to the
+// header's access key, never to an X-Amz-Credential query parameter that
+// was not verified.
+func TestHeaderSignedRequestIgnoresQueryCredential(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	objLayer, fsDir, err := prepareFS(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(fsDir)
+
+	if err = newTestConfig(globalMinioDefaultRegion, objLayer); err != nil {
+		t.Fatalf("unable initialize config file, %s", err)
+	}
+
+	initAllSubsystems(ctx)
+
+	initConfigSubsystem(ctx, objLayer)
+
+	creds, err := auth.CreateCredentials("admin", "mypassword")
+	if err != nil {
+		t.Fatalf("unable create credential, %s", err)
+	}
+	globalActiveCred = creds
+
+	globalIAMSys.Init(ctx, objLayer, globalEtcdClient, 2*time.Second)
+
+	_, err = globalIAMSys.CreateUser(ctx, "lowprivuser", madmin.AddOrUpdateUserReq{
+		SecretKey: "lowprivpassword",
+		Status:    madmin.AccountEnabled,
+	})
+	if err != nil {
+		t.Fatalf("unable create user, %s", err)
+	}
+
+	queryCred := url.QueryEscape("admin/" + UTCNow().Format(yyyymmdd) + "/" + globalMinioDefaultRegion + "/s3/aws4_request")
+	req := mustNewRequest(http.MethodGet, "http://localhost:9000/?X-Amz-Credential="+queryCred, 0, nil, t)
+	if err := signRequestV4(req, "lowprivuser", "lowprivpassword"); err != nil {
+		t.Fatalf("Unable to initialized new signed http request %s", err)
+	}
+	cred, owner, s3Error := validateAdminSignature(ctx, req, globalMinioDefaultRegion)
+	if s3Error == ErrNone && (cred.AccessKey != "lowprivuser" || owner) {
+		t.Fatalf("request signed by lowprivuser was authenticated as %q (owner=%t)", cred.AccessKey, owner)
+	}
+
+	// Same for signature V2 with an AWSAccessKeyId query parameter.
+	req = mustNewRequest(http.MethodGet, "http://localhost:9000/?AWSAccessKeyId=admin", 0, nil, t)
+	if err := signRequestV2(req, "lowprivuser", "lowprivpassword"); err != nil {
+		t.Fatalf("Unable to initialized new signed http request %s", err)
+	}
+	req.RequestURI = req.URL.RequestURI()
+	getRequestAuthType(req)
+	if s3Error = isReqAuthenticatedV2(req); s3Error == ErrNone {
+		cred, owner, s3Error = getReqAccessKeyV2(req)
+		if s3Error == ErrNone && (cred.AccessKey != "lowprivuser" || owner) {
+			t.Fatalf("V2 request signed by lowprivuser was authenticated as %q (owner=%t)", cred.AccessKey, owner)
+		}
+	}
+
+	// Unsigned-trailer uploads must verify any credentials they carry,
+	// whether in the Authorization header or in the query string.
+	unsignedTrailerReq := func(rawURL string) *http.Request {
+		req := mustNewRequest(http.MethodPut, rawURL, 0, nil, t)
+		req.Header.Set(xhttp.AmzContentSha256, unsignedPayloadTrailer)
+		req.Header.Set(xhttp.AmzDate, UTCNow().Format(iso8601Format))
+		return req
+	}
+	fakeSig := strings.Repeat("0", 64)
+
+	req = unsignedTrailerReq("http://localhost:9000/bucket/object")
+	req.Header.Set(xhttp.Authorization, signV4Algorithm+" Credential="+mustUnescape(t, queryCred)+", SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature="+fakeSig)
+	if getRequestAuthType(req) != authTypeStreamingUnsignedTrailer {
+		t.Fatalf("unexpected auth type %v", getRequestAuthType(req))
+	}
+	if _, s3Error = newUnsignedV4ChunkedReader(req, true); s3Error == ErrNone {
+		t.Fatal("unsigned-trailer request with a forged header signature was accepted")
+	}
+
+	req = unsignedTrailerReq("http://localhost:9000/bucket/object?X-Amz-Algorithm=" + signV4Algorithm +
+		"&X-Amz-Credential=" + queryCred + "&X-Amz-Date=" + UTCNow().Format(iso8601Format) +
+		"&X-Amz-Expires=600&X-Amz-SignedHeaders=host&X-Amz-Signature=" + fakeSig)
+	if getRequestAuthType(req) != authTypeStreamingUnsignedTrailer {
+		t.Fatalf("unexpected auth type %v", getRequestAuthType(req))
+	}
+	if _, s3Error = newUnsignedV4ChunkedReader(req, true); s3Error == ErrNone {
+		t.Fatal("unsigned-trailer request with forged query-string credentials was accepted")
+	}
+
+	req = unsignedTrailerReq("http://localhost:9000/bucket/object")
+	getRequestAuthType(req)
+	if _, s3Error = newUnsignedV4ChunkedReader(req, true); s3Error != ErrNone {
+		t.Fatalf("anonymous unsigned-trailer request was rejected: %v", s3Error)
+	}
+}
+
+func mustUnescape(t *testing.T, s string) string {
+	t.Helper()
+	u, err := url.QueryUnescape(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func TestStripUnauthorizedReplicationHeaders(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	objLayer, fsDir, err := prepareFS(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(fsDir)
+
+	if err = newTestConfig(globalMinioDefaultRegion, objLayer); err != nil {
+		t.Fatalf("unable initialize config file, %s", err)
+	}
+
+	initAllSubsystems(ctx)
+
+	initConfigSubsystem(ctx, objLayer)
+
+	creds, err := auth.CreateCredentials("admin", "mypassword")
+	if err != nil {
+		t.Fatalf("unable create credential, %s", err)
+	}
+	globalActiveCred = creds
+
+	globalIAMSys.Init(ctx, objLayer, globalEtcdClient, 2*time.Second)
+
+	_, err = globalIAMSys.CreateUser(ctx, "lowprivuser", madmin.AddOrUpdateUserReq{
+		SecretKey: "lowprivpassword",
+		Status:    madmin.AccountEnabled,
+	})
+	if err != nil {
+		t.Fatalf("unable create user, %s", err)
+	}
+
+	newReq := func(accessKey, secretKey string) *http.Request {
+		req := mustNewRequest(http.MethodPut, "http://localhost:9000/bucket/object", 0, nil, t)
+		req.Header.Set(xhttp.MinIOSourceReplicationRequest, "true")
+		req.Header.Set(xhttp.MinIOSourceMTime, UTCNow().Format(time.RFC3339Nano))
+		if err := signRequestV4(req, accessKey, secretKey); err != nil {
+			t.Fatal(err)
+		}
+		return mux.SetURLVars(req, map[string]string{"bucket": "bucket", "object": "object"})
+	}
+
+	req := newReq("lowprivuser", "lowprivpassword")
+	stripUnauthorizedReplicationHeaders(req)
+	if req.Header.Get(xhttp.MinIOSourceReplicationRequest) != "" || req.Header.Get(xhttp.MinIOSourceMTime) != "" {
+		t.Fatal("replication headers from a user without replication permissions were kept")
+	}
+
+	req = newReq("admin", "mypassword")
+	stripUnauthorizedReplicationHeaders(req)
+	if req.Header.Get(xhttp.MinIOSourceReplicationRequest) != "true" || req.Header.Get(xhttp.MinIOSourceMTime) == "" {
+		t.Fatal("replication headers from the root user were removed")
+	}
+
+	req = mustNewRequest(http.MethodPut, "http://localhost:9000/bucket/object", 0, nil, t)
+	req.Header.Set(xhttp.MinIOSourceReplicationRequest, "true")
+	req = mux.SetURLVars(req, map[string]string{"bucket": "bucket", "object": "object"})
+	stripUnauthorizedReplicationHeaders(req)
+	if req.Header.Get(xhttp.MinIOSourceReplicationRequest) != "" {
+		t.Fatal("replication headers from an anonymous request were kept")
 	}
 }

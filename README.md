@@ -59,7 +59,7 @@ Historical pre-compiled binary releases remain available for reference but are n
 ## Install from Source
 
 Use the following commands to compile and run a standalone MinIO server from source.
-If you do not have a working Golang environment, please follow [How to install Golang](https://golang.org/doc/install). Minimum version required is [go1.24](https://golang.org/dl/#stable)
+If you do not have a working Golang environment, please follow [How to install Golang](https://golang.org/doc/install). Minimum version required is [go1.26](https://golang.org/dl/#stable)
 
 ```sh
 go install github.com/minio/minio@latest

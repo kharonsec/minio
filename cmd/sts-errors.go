@@ -86,6 +86,7 @@ const (
 	ErrSTSIAMNotInitialized
 	ErrSTSUpstreamError
 	ErrSTSInternalError
+	ErrSTSTooManyRequests
 )
 
 type stsErrorCodeMap map[STSErrorCode]STSError
@@ -170,5 +171,10 @@ var stsErrCodes = stsErrorCodeMap{
 		Code:           "InternalError",
 		Description:    "We encountered an internal error generating credentials, please try again.",
 		HTTPStatusCode: http.StatusInternalServerError,
+	},
+	ErrSTSTooManyRequests: {
+		Code:           "Throttling",
+		Description:    "Too many failed login attempts, please try again later.",
+		HTTPStatusCode: http.StatusBadRequest,
 	},
 }

@@ -645,3 +645,47 @@ func BenchmarkReaderReplaceTwo(b *testing.B) {
 		r.Close()
 	}
 }
+
+// endlessLine returns 'a' forever, never a newline.
+type endlessLine struct{ n int64 }
+
+func (e *endlessLine) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'a'
+	}
+	e.n += int64(len(p))
+	return len(p), nil
+}
+
+func TestReadUnboundedLine(t *testing.T) {
+	for _, header := range []bool{true, false} {
+		args := ReaderArgs{
+			FileHeaderInfo:             use,
+			RecordDelimiter:            defaultRecordDelimiter,
+			FieldDelimiter:             defaultFieldDelimiter,
+			QuoteCharacter:             defaultQuoteCharacter,
+			QuoteEscapeCharacter:       defaultQuoteEscapeCharacter,
+			CommentCharacter:           defaultCommentCharacter,
+			AllowQuotedRecordDelimiter: false,
+			unmarshaled:                true,
+		}
+		if !header {
+			args.FileHeaderInfo = none
+		}
+		in := &endlessLine{}
+		r, err := NewReader(io.NopCloser(in), &args)
+		if err == nil {
+			// Records read before the oversized line may be returned first.
+			for i := 0; i < 10 && err == nil; i++ {
+				_, err = r.Read(nil)
+			}
+			r.Close()
+		}
+		if err == nil {
+			t.Fatal("expected an error for a line without end")
+		}
+		if in.n > 8<<20 {
+			t.Fatalf("read %d bytes looking for a newline", in.n)
+		}
+	}
+}

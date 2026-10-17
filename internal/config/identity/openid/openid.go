@@ -206,7 +206,7 @@ func LookupConfig(s config.Config, transport http.RoundTripper, closeRespFn func
 		ProviderCfgs:       map[string]*providerCfg{},
 		pubKeys: publicKeys{
 			RWMutex: &sync.RWMutex{},
-			pkMap:   map[string]any{},
+			pkMap:   map[publicKeyID]any{},
 		},
 		roleArnPolicyMap: map[arn.ARN]string{},
 		transport:        openIDClientTransport,

@@ -139,11 +139,24 @@ func (r *Reader) nextSplit(skip int, dst []byte) ([]byte, error) {
 			return dst, io.EOF
 		}
 	}
-	// Read until next line.
-	in, err := r.buf.ReadBytes('\n')
-	dst = append(dst, in...)
-	return dst, err
+	// Read until next line, without buffering more than one record
+	// may hold, so input without newlines cannot exhaust memory.
+	tail := len(dst)
+	for {
+		in, err := r.buf.ReadSlice('\n')
+		dst = append(dst, in...)
+		if err != bufio.ErrBufferFull {
+			return dst, err
+		}
+		if len(dst)-tail > maxRecordSize {
+			return dst, errOverMaxRecordSize()
+		}
+	}
 }
+
+// maxRecordSize is the maximum length of a single record, matching the
+// 1 MiB limit S3 Select imposes on records.
+const maxRecordSize = 1 << 20
 
 // csvSplitSize is the size of each block.
 // Blocks will read this much and find the first following newline.

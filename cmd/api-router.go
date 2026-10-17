@@ -244,6 +244,10 @@ func s3APIMiddleware(f http.HandlerFunc, flags ...s3HFlag) http.HandlerFunc {
 		// `getHandlerName`.
 		statsCollectedHandler := collectAPIStats(handlerName, throttledHandler)
 
+		// Replication-only headers are honored only from callers
+		// allowed to replicate to the bucket.
+		stripUnauthorizedReplicationHeaders(r)
+
 		// Call the final handler.
 		statsCollectedHandler(w, r)
 	}

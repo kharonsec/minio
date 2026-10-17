@@ -34,14 +34,22 @@ import (
 	"github.com/minio/pkg/v3/policy"
 )
 
+// publicKeyID identifies a public key. Keys are scoped to the provider
+// (role ARN) whose JWKS they were fetched from, so that a token issued by
+// one provider cannot be validated with another provider's keys.
+type publicKeyID struct {
+	arn arn.ARN
+	kid string
+}
+
 type publicKeys struct {
 	*sync.RWMutex
 
-	// map of kid to public key
-	pkMap map[string]any
+	// map of provider and kid to public key
+	pkMap map[publicKeyID]any
 }
 
-func (pk *publicKeys) parseAndAdd(b io.Reader) error {
+func (pk *publicKeys) parseAndAdd(arn arn.ARN, b io.Reader) error {
 	var jwk JWKS
 	err := json.NewDecoder(b).Decode(&jwk)
 	if err != nil {
@@ -53,23 +61,23 @@ func (pk *publicKeys) parseAndAdd(b io.Reader) error {
 		if err != nil {
 			return err
 		}
-		pk.add(key.Kid, pkey)
+		pk.add(arn, key.Kid, pkey)
 	}
 
 	return nil
 }
 
-func (pk *publicKeys) add(keyID string, key any) {
+func (pk *publicKeys) add(arn arn.ARN, keyID string, key any) {
 	pk.Lock()
 	defer pk.Unlock()
 
-	pk.pkMap[keyID] = key
+	pk.pkMap[publicKeyID{arn: arn, kid: keyID}] = key
 }
 
-func (pk *publicKeys) get(kid string) any {
+func (pk *publicKeys) get(arn arn.ARN, kid string) any {
 	pk.RLock()
 	defer pk.RUnlock()
-	return pk.pkMap[kid]
+	return pk.pkMap[publicKeyID{arn: arn, kid: kid}]
 }
 
 // PopulatePublicKey - populates a new publickey from the JWKS URL.
@@ -78,9 +86,6 @@ func (r *Config) PopulatePublicKey(arn arn.ARN) error {
 	if pCfg.JWKS.URL == nil || pCfg.JWKS.URL.String() == "" {
 		return nil
 	}
-
-	// Add client secret for the client ID for HMAC based signature.
-	r.pubKeys.add(pCfg.ClientID, []byte(pCfg.ClientSecret))
 
 	client := &http.Client{
 		Transport: r.transport,
@@ -95,7 +100,7 @@ func (r *Config) PopulatePublicKey(arn arn.ARN) error {
 		return errors.New(resp.Status)
 	}
 
-	return r.pubKeys.parseAndAdd(resp.Body)
+	return r.pubKeys.parseAndAdd(arn, resp.Body)
 }
 
 // ErrTokenExpired - error token expired
@@ -134,11 +139,13 @@ const (
 
 // Validate - validates the id_token.
 func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, dsecs string, claims map[string]any) error {
+	// Only asymmetric signatures from the provider's JWKS are accepted.
+	// HMAC signatures would be keyed with the client secret, which client
+	// applications hold, letting them forge tokens for any identity.
 	jp := new(jwtgo.Parser)
 	jp.ValidMethods = []string{
 		"RS256", "RS384", "RS512",
 		"ES256", "ES384", "ES512",
-		"HS256", "HS384", "HS512",
 		"RS3256", "RS3384", "RS3512",
 		"ES3256", "ES3384", "ES3512",
 	}
@@ -148,7 +155,7 @@ func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, 
 		if !ok {
 			return nil, fmt.Errorf("Invalid kid value %v", jwtToken.Header["kid"])
 		}
-		pubkey := r.pubKeys.get(kid)
+		pubkey := r.pubKeys.get(arn, kid)
 		if pubkey == nil {
 			return nil, fmt.Errorf("No public key found for kid %s", kid)
 		}
@@ -168,7 +175,7 @@ func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, 
 		if err = r.PopulatePublicKey(arn); err != nil {
 			return err
 		}
-		jwtToken, err = jwtgo.ParseWithClaims(token, &mclaims, keyFuncCallback)
+		jwtToken, err = jp.ParseWithClaims(token, &mclaims, keyFuncCallback)
 		if err != nil {
 			return err
 		}

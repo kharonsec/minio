@@ -24,16 +24,29 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	xhttp "github.com/minio/minio/internal/http"
 )
 
 // newUnsignedV4ChunkedReader returns a new s3UnsignedChunkedReader that translates the data read from r
 // out of HTTP "chunked" format before returning it.
 // The s3ChunkedReader returns io.EOF when the final 0-length chunk is read.
-func newUnsignedV4ChunkedReader(req *http.Request, trailer bool, signature bool) (io.ReadCloser, APIErrorCode) {
-	if signature {
-		if errCode := doesSignatureMatch(unsignedPayloadTrailer, req, globalSite.Region(), serviceS3); errCode != ErrNone {
-			return nil, errCode
-		}
+//
+// Requests without credentials are anonymous and are not verified. Any
+// credentials present, in the Authorization header or in the query
+// string, must carry a valid signature.
+func newUnsignedV4ChunkedReader(req *http.Request, trailer bool) (io.ReadCloser, APIErrorCode) {
+	var errCode APIErrorCode
+	switch {
+	case isRequestSignatureV4(req):
+		errCode = doesSignatureMatch(unsignedPayloadTrailer, req, globalSite.Region(), serviceS3)
+	case isRequestPresignedSignatureV4(req):
+		errCode = doesPresignedSignatureMatch(getContentSha256Cksum(req, serviceS3), req, globalSite.Region(), serviceS3)
+	case req.Header.Get(xhttp.Authorization) != "":
+		errCode = ErrSignatureVersionNotSupported
+	}
+	if errCode != ErrNone {
+		return nil, errCode
 	}
 	if trailer {
 		// Discard anything unsigned.

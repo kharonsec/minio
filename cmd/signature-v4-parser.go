@@ -50,18 +50,28 @@ func (c credentialHeader) getScope() string {
 }
 
 func getReqAccessKeyV4(r *http.Request, region string, stype serviceType) (auth.Credentials, bool, APIErrorCode) {
-	ch, s3Err := parseCredentialHeader("Credential="+r.Form.Get(xhttp.AmzCredential), region, stype)
-	if s3Err != ErrNone {
+	// The access key must come from the same place the signature is
+	// verified from (see reqSignatureV4Verify): the Authorization header
+	// takes precedence over the presigned X-Amz-Credential query parameter.
+	// Otherwise a request signed in the header by one user could carry
+	// another user's access key in the query string and be authorized
+	// as that user.
+	if isRequestSignatureV4(r) || !isRequestPresignedSignatureV4(r) {
 		// Strip off the Algorithm prefix.
 		v4Auth := strings.TrimPrefix(r.Header.Get("Authorization"), signV4Algorithm)
 		authFields := strings.Split(strings.TrimSpace(v4Auth), ",")
 		if len(authFields) != 3 {
 			return auth.Credentials{}, false, ErrMissingFields
 		}
-		ch, s3Err = parseCredentialHeader(authFields[0], region, stype)
+		ch, s3Err := parseCredentialHeader(authFields[0], region, stype)
 		if s3Err != ErrNone {
 			return auth.Credentials{}, false, s3Err
 		}
+		return checkKeyValid(r, ch.accessKey)
+	}
+	ch, s3Err := parseCredentialHeader("Credential="+r.Form.Get(xhttp.AmzCredential), region, stype)
+	if s3Err != ErrNone {
+		return auth.Credentials{}, false, s3Err
 	}
 	return checkKeyValid(r, ch.accessKey)
 }

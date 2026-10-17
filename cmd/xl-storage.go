@@ -3194,7 +3194,20 @@ func (s *xlStorage) ReadParts(ctx context.Context, volume string, partMetaPaths 
 func (s *xlStorage) ReadMultiple(ctx context.Context, req ReadMultipleReq, resp chan<- ReadMultipleResp) error {
 	defer xioutil.SafeClose(resp)
 
-	volumeDir := pathJoin(s.drivePath, req.Bucket)
+	// The request may come from a msgpack body, which is not checked by
+	// the request validity middleware; reject traversal out of the drive.
+	if hasBadPathComponent(req.Bucket) || hasBadPathComponent(req.Prefix) {
+		return errFileAccessDenied
+	}
+	for _, f := range req.Files {
+		if hasBadPathComponent(f) {
+			return errFileAccessDenied
+		}
+	}
+	volumeDir, err := s.getVolDir(req.Bucket)
+	if err != nil {
+		return err
+	}
 	found := 0
 	for _, f := range req.Files {
 		if contextCanceled(ctx) {
