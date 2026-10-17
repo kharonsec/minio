@@ -18,6 +18,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -84,6 +85,35 @@ func TestAPIErrCodeDefinition(t *testing.T) {
 		}
 		if errCode.HTTPStatusCode == 0 {
 			t.Fatal(errAPI, "error code has a zero HTTP status code")
+		}
+	}
+}
+
+// Regression test for https://github.com/minio/minio/issues/21736
+func TestAPIErrCodeContextCanceledOnShutdown(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Server running: a canceled request means the client went away.
+	if got := toAPIErrorCode(canceled, context.Canceled); got != ErrClientDisconnected {
+		t.Fatalf("expected %v, got %v", ErrClientDisconnected, got)
+	}
+	if got := toAPIErrorCode(context.Background(), context.Canceled); got != ErrClientDisconnected {
+		t.Fatalf("expected %v, got %v", ErrClientDisconnected, got)
+	}
+
+	// Server shutting down: GlobalContext is canceled.
+	savedGlobalContext := GlobalContext
+	GlobalContext = canceled
+	defer func() { GlobalContext = savedGlobalContext }()
+
+	for _, ctx := range []context.Context{canceled, context.Background()} {
+		got := toAPIErrorCode(ctx, context.Canceled)
+		if got != ErrServerShuttingDown {
+			t.Fatalf("expected %v, got %v", ErrServerShuttingDown, got)
+		}
+		if status := errorCodes.ToAPIErr(got).HTTPStatusCode; status != 503 {
+			t.Fatalf("expected HTTP status 503, got %d", status)
 		}
 	}
 }
