@@ -26,6 +26,8 @@ import (
 	"github.com/minio/minio/internal/auth"
 	objectlock "github.com/minio/minio/internal/bucket/object/lock"
 	"github.com/minio/minio/internal/bucket/replication"
+	"github.com/minio/minio/internal/etag"
+	"github.com/minio/minio/internal/hash"
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/pkg/v3/policy"
@@ -337,6 +339,30 @@ func checkPutObjectLockAllowed(ctx context.Context, rq *http.Request, bucket, ob
 		return "", objectlock.RetentionDate{}, legalHold, ErrNone
 	}
 	return mode, retainDate, legalHold, ErrNone
+}
+
+// checkObjectLockIntegrityHeaders returns ErrMissingContentMD5 if the
+// request uploads data under an object lock retention period without a
+// Content-MD5 or x-amz-checksum-* header (or trailer), as required by S3.
+// See https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock-managing.html
+//
+// The check is skipped for servers running with --no-compat and for
+// replication requests.
+func checkObjectLockIntegrityHeaders(r *http.Request) APIErrorCode {
+	if !globalServerCtxt.StrictS3Compat {
+		return ErrNone
+	}
+	if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
+		return ErrNone
+	}
+	if etag.ContentMD5Requested(r.Header) {
+		return ErrNone
+	}
+	// An invalid checksum header is reported as such later on.
+	if cksum, err := hash.GetContentChecksum(r.Header); err != nil || cksum != nil {
+		return ErrNone
+	}
+	return ErrMissingContentMD5
 }
 
 // NewBucketObjectLockSys returns initialized BucketObjectLockSys
